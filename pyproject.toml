@@ -1,0 +1,18 @@
+[project]
+name = "enterprise-knowledge-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.136.0",
+    "pydantic>=2.13.2",
+    "pydantic-settings>=2.13.1",
+    "uvicorn>=0.44.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.0.3",
+]
