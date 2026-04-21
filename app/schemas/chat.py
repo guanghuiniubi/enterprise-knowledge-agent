@@ -26,4 +26,6 @@ class ChatResponse(BaseModel):
     citations: List[Citation] = []
     tool_calls: List[ToolCall] = []
     session_id: str
+    need_clarification: bool = False
+    clarification_question: Optional[str] = None
     debug: Optional[dict] = None

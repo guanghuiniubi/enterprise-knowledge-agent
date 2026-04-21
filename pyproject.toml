@@ -5,9 +5,19 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "beautifulsoup4>=4.14.3",
     "fastapi>=0.136.0",
+    "langsmith>=0.7.32",
+    "markdown>=3.10.2",
+    "openai>=2.32.0",
+    "pgvector>=0.4.2",
+    "psycopg>=3.3.3",
     "pydantic>=2.13.2",
     "pydantic-settings>=2.13.1",
+    "sentence-transformers>=5.4.1",
+    "sqlalchemy>=2.0.49",
+    "torch>=2.11.0",
+    "transformers>=5.5.4",
     "uvicorn>=0.44.0",
 ]
 

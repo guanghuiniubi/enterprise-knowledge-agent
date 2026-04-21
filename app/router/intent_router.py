@@ -1,17 +1,20 @@
 from app.schemas.agent import RouteResult
+from app.router.llm_router import llm_router
+from app.observability.tracing import traceable
 
 
 class IntentRouter:
-    def route(self, question: str) -> RouteResult:
+    @traceable(name="intent_router")
+    def route(self, question: str, context: str = "") -> RouteResult:
         q = question.lower()
 
-        if "工单" in question or "ticket" in q:
-            return RouteResult(route="ticket_query", reason="命中工单关键词")
+        if "工单号" in question:
+            return RouteResult(route="ticket_query", reason="规则命中工单号")
 
-        if "组织" in question or "部门" in question or "leader" in q:
-            return RouteResult(route="org_query", reason="命中组织信息关键词")
+        if "部门负责人" in question or "leader" in q:
+            return RouteResult(route="org_query", reason="规则命中部门负责人")
 
-        if "审批" in question or "流程" in question:
-            return RouteResult(route="workflow_query", reason="命中流程关键词")
+        if "审批流" in question:
+            return RouteResult(route="workflow_query", reason="规则命中审批流")
 
-        return RouteResult(route="knowledge_qa", reason="默认走知识问答")
+        return llm_router.route(question=question, context=context)

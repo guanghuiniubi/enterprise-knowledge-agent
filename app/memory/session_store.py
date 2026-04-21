@@ -15,6 +15,15 @@ class SessionStore:
     def get_messages(self, session_id: str) -> List[dict]:
         return self._store.get(session_id, [])
 
+    def get_recent_messages(self, session_id: str, limit: int = 6) -> List[dict]:
+        return self._store.get(session_id, [])[-limit:]
+
+    def format_recent_context(self, session_id: str, limit: int = 6) -> str:
+        messages = self.get_recent_messages(session_id, limit=limit)
+        if not messages:
+            return ""
+        return "\n".join([f"{m['role']}: {m['content']}" for m in messages])
+
     def clear(self, session_id: str):
         self._store.pop(session_id, None)
 
