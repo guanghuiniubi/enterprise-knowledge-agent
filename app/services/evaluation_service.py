@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 from app.agent.orchestrator import agent_orchestrator
 from app.core.config import settings
+from app.observability.metrics import observability_manager
 from app.schemas.agent import AgentResult
 from app.schemas.evaluation import (
     EvaluationCase,
@@ -98,6 +99,11 @@ class EvaluationService:
             avg_step_count=round(sum(item.step_count for item in results) / total, 4) if total else 0.0,
             avg_latency_ms=round(sum(item.latency_ms for item in results) / total, 4) if total else 0.0,
             fallback_rate=round(sum(1 for item in results if item.fallback) / total, 4) if total else 0.0,
+        )
+        observability_manager.record_evaluation_run(
+            case_count=total,
+            accuracy=summary.accuracy,
+            fallback_rate=summary.fallback_rate,
         )
         return EvaluationRunResponse(summary=summary, results=results)
 

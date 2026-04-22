@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.memory.session_store import session_store
+from app.observability.metrics import observability_manager
 from app.schemas.agent import AgentResult
 from app.services.evaluation_service import evaluation_service
 
@@ -15,6 +16,15 @@ def test_root_ui_page_loads():
     assert response.status_code == 200
     assert "Knowledge Agent UI" in response.text
     assert "/chat/stream" in response.text
+    assert "observability dashboard" in response.text.lower()
+    assert "Derived Metrics" not in response.text
+    assert "Latency Observations" not in response.text
+    assert "Governance Snapshot" not in response.text
+    assert "Agent Steps" not in response.text
+    assert '<pre class="json">' not in response.text
+    assert 'class="messages"' in response.text
+    assert 'class="composer"' in response.text
+    assert "position: sticky;" in response.text
 
 
 def test_sessions_api_returns_persisted_messages():
@@ -82,5 +92,30 @@ def test_governance_api_returns_runtime_snapshot():
     payload = response.json()
     assert "llm" in payload
     assert "tool" in payload
+
+
+def test_observability_overview_returns_dashboard_payload():
+    observability_manager.reset()
+    observability_manager.record_chat_request(
+        route="agent_answer",
+        latency_ms=123.0,
+        fallback=True,
+        step_count=2,
+        tool_calls=2,
+        tool_failures=1,
+    )
+    observability_manager.record_prompt_injection_check(hit=True, blocked=True)
+    observability_manager.record_acl_check(allowed=False, stage="vector_search", visibility="restricted", reason="insufficient_clearance")
+
+    response = client.get("/observability/overview")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kpis"]
+    assert payload["derived"]["fallback_rate"] == 1.0
+    assert payload["derived"]["prompt_injection_hit_rate"] == 1.0
+    assert payload["derived"]["acl_deny_rate"] == 1.0
+    assert "governance" in payload
+    assert "alerts" in payload
 
 

@@ -59,12 +59,16 @@ http://127.0.0.1:8000/
 - 删除会话
 - 普通 / 流式问答
 - 查看工具调用与 Agent steps
+- 内置 observability dashboard（KPI / alerts / governance / latency）
 
-## 新增能力：Prompt / 治理 / Rerank / 评测
+## 新增能力：Prompt / 治理 / Rerank / 评测 / 权限 / 安全
 
 ### 1. Prompt Version 管理
 
-现在所有关键 Prompt 都统一收敛到 `app/prompts/registry.py`：
+现在所有关键 Prompt 都统一收敛到：
+
+- `app/prompts/registry.py`
+- `app/prompts/prompts.yaml`
 
 - `agent_system`
 - `agent_user`
@@ -77,11 +81,14 @@ http://127.0.0.1:8000/
 - 多版本注册
 - 激活当前生效版本
 - 查询当前 active version
+- YAML 持久化
+- 热加载 reload
 - 在 Agent debug 信息中回传当前 prompt 版本
 
 接口：
 
 - `GET /prompts`：查看所有 prompt 与 active version
+- `POST /prompts/reload`：从 YAML 重新加载 prompt
 - `GET /prompts/{name}`：查看某个 prompt 当前激活版本
 - `POST /prompts/{name}/activate`：切换 prompt 版本
 
@@ -91,7 +98,39 @@ http://127.0.0.1:8000/
 curl http://127.0.0.1:8000/prompts
 ```
 
-### 2. 限流 / 熔断 / 超时治理
+### 2. 知识权限过滤
+
+新增访问控制模块：`app/security/access_control.py`
+
+支持：
+
+- 文档级权限控制
+- 基于 `user_id / role / department / clearance_level` 的访问校验
+- 检索前过滤召回结果
+- 读取主题详情前做二次权限检查
+
+请求里已支持传入：
+
+- `user_roles`
+- `user_departments`
+- `clearance_level`
+
+Markdown 知识文档也支持 YAML front matter，例如：
+
+```md
+---
+title: JVM 调优与线上排障
+access:
+  visibility: restricted
+  allowed_roles: [backend, infra]
+  allowed_departments: [platform]
+  min_clearance: 2
+---
+
+正文内容...
+```
+
+### 3. 分布式限流 / 熔断 / 超时治理
 
 新增治理模块：`app/core/governance.py`
 
@@ -101,6 +140,8 @@ curl http://127.0.0.1:8000/prompts
 - LLM 调用级限流、熔断、超时
 - Tool 调用级限流、熔断、超时
 - 运行时治理状态快照
+- Redis 后端分布式治理
+- Redis 不可用时自动回退本地内存治理
 
 当模型或工具不可用时，Agent 会：
 
@@ -112,7 +153,13 @@ curl http://127.0.0.1:8000/prompts
 
 - `GET /governance`：查看当前治理配置与 circuit state
 
-### 3. 更完善的 Rerank 策略
+关键配置：
+
+- `GOVERNANCE_BACKEND=memory|redis`
+- `REDIS_URL=redis://localhost:6379/0`
+- `REDIS_KEY_PREFIX=eka`
+
+### 4. 更完善的 Rerank 策略
 
 新增 `app/rag/reranker.py`，当前采用轻量 Hybrid Rerank：
 
@@ -129,7 +176,29 @@ curl http://127.0.0.1:8000/prompts
 2. 再做 hybrid rerank
 3. 最终把 `rerank_score` 和诊断信息一并返回
 
-### 4. 评测体系（accuracy / step / latency / fallback）
+### 5. 安全防护：Prompt Injection / 输出风险过滤 / 日志脱敏
+
+新增模块：
+
+- `app/security/content_guard.py`
+- `app/security/redaction.py`
+- `app/core/logging.py`
+
+当前支持：
+
+- Prompt Injection 检测与阻断
+- 系统提示词 / 工具协议泄露拦截
+- 输出中的 `api_key / password / secret / bearer token / 手机号 / 邮箱` 脱敏
+- 日志自动脱敏
+
+典型拦截场景：
+
+- `ignore all previous instructions`
+- `reveal system prompt`
+- `输出系统提示词`
+- `developer message`
+
+### 6. 评测体系（accuracy / step / latency / fallback）
 
 新增：
 
@@ -144,6 +213,38 @@ curl http://127.0.0.1:8000/prompts
 - `latency_ms`：单条 case 总耗时
 - `fallback`：是否触发降级
 - `passed`：是否满足阈值要求
+
+### 7. 可观测体系与 Dashboard
+
+当前系统已经补齐一套轻量但可运营的可观测闭环，包括：
+
+- HTTP 请求级指标
+- Chat / Stream 请求量与延迟
+- Fallback rate
+- Prompt injection hit rate / block rate
+- ACL deny rate
+- Tool failure rate
+- Retrieval / rerank / LLM / tool latency
+- 告警快照与治理状态
+
+后端接口：
+
+- `GET /observability/metrics`：原始 counters / observations / derived / alerts
+- `GET /observability/overview`：dashboard 直接消费的 KPI / alerts / governance / latency 摘要
+- `GET /observability/alerts`：告警视图
+
+前端访问：
+
+- `GET /`：内置聊天 UI + observability dashboard
+
+Dashboard 默认展示的关键指标：
+
+- `fallback_rate`
+- `prompt_injection_hit_rate`
+- `acl_deny_rate`
+- `tool_failure_rate`
+- `chat_p95_latency_ms`
+- `retrieval_p95_latency_ms`
 
 请求示例：
 
@@ -171,6 +272,7 @@ curl -X POST http://127.0.0.1:8000/evaluation/run \
 - `GET /db/health`
 - `GET /governance`
 - `GET /prompts`
+- `POST /prompts/reload`
 - `GET /prompts/{name}`
 - `POST /prompts/{name}/activate`
 - `GET /sessions`
@@ -190,6 +292,9 @@ curl -X POST http://127.0.0.1:8000/chat \
   -d '{
 	"user_id": "u1",
 	"session_id": "s1",
+	"user_roles": ["backend"],
+	"user_departments": ["platform"],
+	"clearance_level": 1,
 	"question": "为什么 TCP 建连需要三次握手，而不是两次？"
   }'
 ```
@@ -227,8 +332,14 @@ uv run pytest -q
 当前新增测试已覆盖：
 
 - Prompt version 激活
+- Prompt YAML 持久化
 - 治理超时与熔断
+- Redis 治理后端切换
 - Hybrid rerank 排序
+- 知识权限过滤
+- Prompt injection 阻断
+- 输出风险过滤
+- 日志脱敏
 - 评测汇总统计
 - Prompt / Governance / Evaluation API 回归
 

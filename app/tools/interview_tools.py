@@ -1,10 +1,11 @@
-import re
+from app.observability.metrics import observability_manager
 
 from app.observability.tracing import traceable
 from app.rag.reranker import hybrid_reranker
 from app.rag.vector_retriever import vector_retriever
 from app.repositories.kb_chunk_repo import kb_chunk_repo
 from app.repositories.kb_document_repo import kb_document_repo
+from app.security.access_control import AccessContext, knowledge_access_controller
 
 
 class InterviewToolkit:
@@ -134,8 +135,11 @@ class InterviewToolkit:
         ]
 
     @traceable(name="tool_list_topics")
-    def list_topics(self) -> dict:
-        records = kb_document_repo.list_documents(limit=50)
+    def list_topics(self, access_context: AccessContext | None = None) -> dict:
+        records = knowledge_access_controller.filter_documents(
+            kb_document_repo.list_documents(limit=50),
+            access_context,
+        )
         topics = [
             {
                 "id": str(item.id),
@@ -152,8 +156,8 @@ class InterviewToolkit:
         }
 
     @traceable(name="tool_search_knowledge")
-    def search_knowledge(self, query: str, top_k: int = 3) -> dict:
-        results = self.retriever.search(query=query, top_k=top_k)
+    def search_knowledge(self, query: str, top_k: int = 3, access_context: AccessContext | None = None) -> dict:
+        results = self.retriever.search(query=query, top_k=top_k, access_context=access_context)
         normalized_results = [
             {
                 "id": item["document_id"],
@@ -169,6 +173,15 @@ class InterviewToolkit:
         return {
             "query": query,
             "results": normalized_results,
+            "access_control": {
+                "filtered": True,
+                "scope": {
+                    "user_id": access_context.user_id if access_context else None,
+                    "roles": list(access_context.roles) if access_context else [],
+                    "departments": list(access_context.departments) if access_context else [],
+                    "clearance_level": access_context.clearance_level if access_context else 0,
+                },
+            },
             "rerank": {
                 "strategy": "hybrid_vector_keyword_diversity",
                 "top_candidates": self._extract_rerank_diagnostics(normalized_results),
@@ -176,12 +189,26 @@ class InterviewToolkit:
         }
 
     @traceable(name="tool_read_topic")
-    def read_topic(self, doc_id: str = "", topic: str = "") -> dict:
+    def read_topic(self, doc_id: str = "", topic: str = "", access_context: AccessContext | None = None) -> dict:
         document = self._get_document(doc_id=doc_id, topic=topic)
         if not document:
             return {
                 "found": False,
                 "message": f"没有找到主题：{doc_id or topic}",
+            }
+
+        decision = knowledge_access_controller.evaluate(document.metadata_json, access_context)
+        observability_manager.record_acl_check(
+            allowed=decision.allowed,
+            stage="read_topic",
+            visibility=decision.visibility,
+            reason=decision.reason,
+        )
+        if not decision.allowed:
+            return {
+                "found": False,
+                "forbidden": True,
+                "message": f"当前用户无权限访问主题：{doc_id or topic or document.title}",
             }
 
         all_chunks = kb_chunk_repo.list_by_document_id(document.id, limit=50)
@@ -222,8 +249,8 @@ class InterviewToolkit:
         }
 
     @traceable(name="tool_generate_quiz")
-    def generate_quiz(self, doc_id: str = "", topic: str = "", count: int = 3) -> dict:
-        payload = self.read_topic(doc_id=doc_id, topic=topic)
+    def generate_quiz(self, doc_id: str = "", topic: str = "", count: int = 3, access_context: AccessContext | None = None) -> dict:
+        payload = self.read_topic(doc_id=doc_id, topic=topic, access_context=access_context)
         if not payload.get("found"):
             return {
                 "found": False,

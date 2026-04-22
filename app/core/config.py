@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     knowledge_base_path: str = "data/knowledge_docs.json"
     embedding_model_name: str = "BAAI/bge-small-zh-v1.5"
     embedding_dimension: int = 512
+    prompt_registry_path: str = "app/prompts/prompts.yaml"
+
+    knowledge_default_visibility: str = "public"
+    knowledge_default_min_clearance: int = 0
+
+    governance_backend: str = "memory"
+    redis_url: str | None = None
+    redis_key_prefix: str = "eka"
 
     request_rate_limit_window_seconds: int = 60
     request_rate_limit_max_requests: int = 20
@@ -47,6 +55,20 @@ class Settings(BaseSettings):
     rerank_diversity_lambda: float = 0.85
 
     evaluation_pass_accuracy_threshold: float = 1.0
+
+    security_prompt_injection_mode: str = "block"
+    output_filter_redact_secrets: bool = True
+    logging_redact_enabled: bool = True
+
+    observability_window_seconds: int = 900
+    observability_max_samples: int = 1000
+    alert_min_samples: int = 5
+    alert_latency_p95_threshold_ms: float = 3000.0
+    alert_fallback_rate_threshold: float = 0.2
+    alert_security_block_rate_threshold: float = 0.1
+    alert_prompt_injection_hit_rate_threshold: float = 0.15
+    alert_acl_deny_rate_threshold: float = 0.35
+    alert_tool_failure_rate_threshold: float = 0.15
 
     model_config = SettingsConfigDict(
         env_file=".env",

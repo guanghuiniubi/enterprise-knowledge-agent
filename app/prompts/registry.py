@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from threading import RLock
 from typing import Any
+
+import yaml
+
+from app.core.config import settings
 
 
 @dataclass(frozen=True)
@@ -15,10 +20,11 @@ class PromptVersion:
 
 
 class PromptRegistry:
-	def __init__(self):
+	def __init__(self, store_path: str | None = None):
 		self._lock = RLock()
 		self._prompts: dict[str, dict[str, PromptVersion]] = {}
 		self._active_versions: dict[str, str] = {}
+		self._store_path = Path(store_path).resolve() if store_path else None
 		self._bootstrap_defaults()
 
 	def register(
@@ -30,6 +36,7 @@ class PromptRegistry:
 		description: str = "",
 		metadata: dict[str, Any] | None = None,
 		make_active: bool = False,
+		persist: bool = True,
 	) -> PromptVersion:
 		prompt = PromptVersion(
 			name=name,
@@ -42,12 +49,15 @@ class PromptRegistry:
 			self._prompts.setdefault(name, {})[version] = prompt
 			if make_active or name not in self._active_versions:
 				self._active_versions[name] = version
+			if persist:
+				self._persist_locked()
 		return prompt
 
 	def activate(self, name: str, version: str) -> PromptVersion:
 		prompt = self.get(name=name, version=version)
 		with self._lock:
 			self._active_versions[name] = version
+			self._persist_locked()
 		return prompt
 
 	def get(self, *, name: str, version: str | None = None) -> PromptVersion:
@@ -63,6 +73,12 @@ class PromptRegistry:
 	def render(self, name: str, version: str | None = None, **kwargs: Any) -> str:
 		prompt = self.get(name=name, version=version)
 		return prompt.template.format(**kwargs)
+
+	def reload(self):
+		with self._lock:
+			self._prompts = {}
+			self._active_versions = {}
+			self._bootstrap_defaults()
 
 	def active_versions(self) -> dict[str, str]:
 		with self._lock:
@@ -89,87 +105,62 @@ class PromptRegistry:
 			return payload
 
 	def _bootstrap_defaults(self):
-		self.register(
-			name="agent_system",
-			version="v1",
-			description="基础 Agent 系统提示词，强调工具优先和澄清。",
-			template="""
-你是一个用于面试准备的知识 Agent。
-你的目标不是一次性瞎答，而是优先调用工具查知识，再结合观察结果给出结构化回答。
+		if self._store_path and self._store_path.is_file():
+			self._load_from_yaml(self._store_path)
+			return
 
-工作规则：
-1. 优先使用工具收集信息，尤其是 search_knowledge 和 read_topic。
-2. 当用户问题太泛时，不要乱答，直接输出：CLARIFICATION: <你的追问>
-3. 当信息已经足够时，直接给出最终答案，不要再输出 JSON。
-4. 如果要调用工具，可以附带一句简短 planning note，说明你下一步想做什么。
-5. 最终答案要尽量包含：核心结论、回答思路、易错点、可追问。
-6. 如果引用了某个主题，请把主题名自然带进答案里。
-7. 如果治理层提示当前工具或模型繁忙，请优先利用已拿到的观察结果继续回答，必要时明确说明降级。
-""",
-			metadata={"owner": "agent", "category": "system"},
-			make_active=True,
-		)
-		self.register(
-			name="agent_user",
-			version="v1",
-			description="Agent 的用户侧输入模板。",
-			template="""
-历史会话：
-{context}
+		default_path = Path(__file__).with_name("prompts.yaml")
+		self._load_from_yaml(default_path)
+		self._persist_locked()
 
-当前问题：{question}
+	def _load_from_yaml(self, path: Path):
+		payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+		active_versions = payload.get("active_versions") or {}
+		prompts = payload.get("prompts") or {}
 
-请在需要时自主调用工具。
-""",
-			metadata={"owner": "agent", "category": "user"},
-			make_active=True,
-		)
-		self.register(
-			name="fallback_summary_system",
-			version="v1",
-			description="Agent 降级总结提示词。",
-			template="你是面试知识点总结助手。请输出核心结论、回答思路、易错点、可追问。",
-			metadata={"owner": "agent", "category": "fallback"},
-			make_active=True,
-		)
-		self.register(
-			name="fallback_summary_user",
-			version="v1",
-			description="Agent 降级总结的用户模板。",
-			template="""
-历史会话：
-{context}
+		for name, versions in prompts.items():
+			for version, config in (versions or {}).items():
+				prompt = PromptVersion(
+					name=name,
+					version=version,
+					template=str((config or {}).get("template") or "").strip(),
+					description=str((config or {}).get("description") or ""),
+					metadata=dict((config or {}).get("metadata") or {}),
+				)
+				self._prompts.setdefault(name, {})[version] = prompt
 
-用户问题：{question}
+		for name, version in active_versions.items():
+			if name in self._prompts and version in self._prompts[name]:
+				self._active_versions[name] = version
 
-Agent 已收集资料：
-{observations}
-""",
-			metadata={"owner": "agent", "category": "fallback"},
-			make_active=True,
-		)
-		self.register(
-			name="route_classifier_system",
-			version="v1",
-			description="意图路由分类提示词。",
-			template="""
-你是企业知识问答系统的意图分类器。
-请根据用户问题和上下文，将问题分类到以下类别之一：
-1. knowledge_qa: 企业制度、知识文档、FAQ类问题
-2. ticket_query: 工单状态、处理进度查询
-3. org_query: 组织架构、部门负责人、联系人查询
-4. workflow_query: 审批流程、流程节点、办理步骤查询
-5. clarification: 用户信息不足，必须先追问再继续
+		for name, versions in self._prompts.items():
+			if name not in self._active_versions and versions:
+				self._active_versions[name] = sorted(versions)[0]
 
-如果问题缺少关键参数，例如用户问“我的工单怎么样了”但没有工单号，或者“审批到哪一步了”但没有业务单号，可以返回 clarification。
-
-输出必须是JSON，格式如下：{"route":"knowledge_qa","reason":"...","missing_slots":["ticket_id"]}
-""",
-			metadata={"owner": "router", "category": "system"},
-			make_active=True,
+	def _persist_locked(self):
+		if not self._store_path:
+			return
+		self._store_path.parent.mkdir(parents=True, exist_ok=True)
+		payload = {
+			"active_versions": self._active_versions,
+			"prompts": {
+				name: {
+					version: {
+						"description": prompt.description,
+						"metadata": prompt.metadata,
+						"template": prompt.template,
+					}
+					for version, prompt in sorted(versions.items())
+				}
+				for name, versions in sorted(self._prompts.items())
+			},
+		}
+		self._store_path.write_text(
+			yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+			encoding="utf-8",
 		)
 
 
-prompt_registry = PromptRegistry()
+prompt_registry = PromptRegistry(settings.prompt_registry_path)
 
 

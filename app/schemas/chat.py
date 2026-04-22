@@ -6,6 +6,9 @@ class ChatRequest(BaseModel):
     user_id: str = Field(..., description="用户ID")
     session_id: str = Field(..., description="会话ID")
     question: str = Field(..., description="用户问题")
+    user_roles: List[str] = Field(default_factory=list, description="用户角色")
+    user_departments: List[str] = Field(default_factory=list, description="用户部门")
+    clearance_level: int = Field(default=0, description="用户密级等级")
 
 
 class Citation(BaseModel):

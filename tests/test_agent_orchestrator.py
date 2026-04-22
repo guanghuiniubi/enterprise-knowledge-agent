@@ -7,6 +7,15 @@ from app.services.chat_service import chat_service
 from app.schemas.chat import ChatRequest
 
 
+def _parse_sse_chunks(chunks: list[str]) -> list[dict]:
+    events: list[dict] = []
+    for chunk in chunks:
+        line = next((item for item in chunk.splitlines() if item.startswith("data: ")), None)
+        if line:
+            events.append(json.loads(line[6:]))
+    return events
+
+
 def test_agent_runs_react_loop(monkeypatch):
     monkeypatch.setattr(
         interview_toolkit,
@@ -123,17 +132,39 @@ def test_chat_stream_emits_tool_and_final_events(monkeypatch):
             }]
         },
         {
-            "content": "总结最终答案",
+            "content": "资料已足够，整理成最终回答",
             "tool_calls": []
         }
     ])
     monkeypatch.setattr(llm_client, "chat_with_tools", lambda messages, tools: next(responses))
+    monkeypatch.setattr(
+        llm_client,
+        "chat_messages_stream",
+        lambda messages: iter([
+            "核心结论：Redis 持久化包括 RDB 和 AOF。",
+            "回答思路：先说明两者区别，再补充混合持久化。",
+        ]),
+    )
 
     req = ChatRequest(user_id="u1", session_id="s-stream", question="Redis 持久化有哪些方式？")
     chunks = list(chat_service.chat_stream(req))
+    events = _parse_sse_chunks(chunks)
+    event_types = [event["type"] for event in events]
+    answer_deltas = [event["delta"] for event in events if event["type"] == "answer_delta"]
+    final_event = next(event for event in events if event["type"] == "final")
 
-    assert any("tool_result" in chunk for chunk in chunks)
-    assert any("\"type\": \"final\"" in chunk for chunk in chunks)
+    assert event_types[0] == "start"
+    assert "tool_result" in event_types
+    assert "answer_delta" in event_types
+    assert event_types.index("answer_delta") < event_types.index("final")
+    assert answer_deltas == [
+        "核心结论：Redis 持久化包括 RDB 和 AOF。",
+        "回答思路：先说明两者区别，再补充混合持久化。",
+    ]
+    assert "".join(answer_deltas) == final_event["result"]["answer"]
+    assert final_event["result"]["route"] == "agent_answer"
+    assert final_event["result"]["tool_calls"][0]["tool_name"] == "search_knowledge"
+    assert final_event["result"]["agent_steps"]
 
 
 def test_agent_retries_tool_then_recovers(monkeypatch):

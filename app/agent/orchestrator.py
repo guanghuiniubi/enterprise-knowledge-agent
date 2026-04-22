@@ -1,10 +1,13 @@
 import json
+import time
 
+from app.observability.metrics import observability_manager
 from app.core.governance import GovernanceError, governance_manager
 from app.llm.client import llm_client
 from app.observability.tracing import traceable
 from app.prompts.registry import prompt_registry
 from app.schemas.agent import AgentResult
+from app.security.access_control import AccessContext
 from app.tools.interview_tools import interview_toolkit
 
 
@@ -31,24 +34,40 @@ class AgentOrchestrator:
             }
         ]
 
-    def _dispatch_tool(self, name: str, arguments: dict) -> dict:
+    def _dispatch_tool(self, name: str, arguments: dict, access_context: AccessContext | None = None) -> dict:
+        def maybe_call(func, **kwargs):
+            payload = dict(kwargs)
+            if access_context is None:
+                payload.pop("access_context", None)
+            try:
+                return func(**payload)
+            except TypeError:
+                payload.pop("access_context", None)
+                return func(**payload)
+
         if name == "list_topics":
-            return self.toolkit.list_topics()
+            return maybe_call(self.toolkit.list_topics, access_context=access_context)
         if name == "search_knowledge":
-            return self.toolkit.search_knowledge(
+            return maybe_call(
+                self.toolkit.search_knowledge,
                 query=arguments.get("query", ""),
-                top_k=int(arguments.get("top_k", 3))
+                top_k=int(arguments.get("top_k", 3)),
+                access_context=access_context,
             )
         if name == "read_topic":
-            return self.toolkit.read_topic(
-                doc_id=arguments.get("doc_id", ""),
-                topic=arguments.get("topic", "")
-            )
-        if name == "generate_quiz":
-            return self.toolkit.generate_quiz(
+            return maybe_call(
+                self.toolkit.read_topic,
                 doc_id=arguments.get("doc_id", ""),
                 topic=arguments.get("topic", ""),
-                count=int(arguments.get("count", 3))
+                access_context=access_context,
+            )
+        if name == "generate_quiz":
+            return maybe_call(
+                self.toolkit.generate_quiz,
+                doc_id=arguments.get("doc_id", ""),
+                topic=arguments.get("topic", ""),
+                count=int(arguments.get("count", 3)),
+                access_context=access_context,
             )
         return {"error": f"unknown tool: {name}"}
 
@@ -58,13 +77,26 @@ class AgentOrchestrator:
         except json.JSONDecodeError as exc:
             return {}, f"invalid tool arguments: {exc}"
 
-    def _execute_tool_with_retry(self, name: str, arguments: dict) -> tuple[dict, list[dict]]:
+    def _execute_tool_with_retry(
+        self,
+        name: str,
+    arguments: dict,
+    access_context: AccessContext | None = None,
+    ) -> tuple[dict, list[dict]]:
         attempts: list[dict] = []
         for attempt in range(1, self.MAX_TOOL_RETRIES + 2):
+            started = time.perf_counter()
             try:
                 observation = governance_manager.execute_tool(
                     name,
-                    lambda: self._dispatch_tool(name=name, arguments=arguments),
+                    lambda: self._dispatch_tool(name=name, arguments=arguments, access_context=access_context),
+                )
+                success = not (isinstance(observation, dict) and observation.get("error"))
+                observability_manager.record_tool_call(
+                    name=name,
+                    latency_ms=round((time.perf_counter() - started) * 1000, 3),
+                    success=success,
+                    error_kind="tool_output_error" if not success else None,
                 )
                 attempts.append({"attempt": attempt, "success": True})
                 if attempt > 1 and isinstance(observation, dict):
@@ -75,6 +107,12 @@ class AgentOrchestrator:
                     }
                 return observation, attempts
             except Exception as exc:  # noqa: BLE001
+                observability_manager.record_tool_call(
+                    name=name,
+                    latency_ms=round((time.perf_counter() - started) * 1000, 3),
+                    success=False,
+                    error_kind=type(exc).__name__,
+                )
                 attempts.append({
                     "attempt": attempt,
                     "success": False,
@@ -95,6 +133,43 @@ class AgentOrchestrator:
                 "title": doc["title"],
                 "snippet": doc["summary"] or doc["content"][:120],
             })
+
+    def _observations_text(self, agent_steps: list[dict]) -> str:
+        if not agent_steps:
+            return "无"
+
+        observations: list[str] = []
+        for step in agent_steps:
+            action = step.get("action", "unknown")
+            observation = step.get("observation")
+            if not observation:
+                continue
+            observations.append(
+                f"步骤 {step.get('step', '?')} · {action}: {json.dumps(observation, ensure_ascii=False)}"
+            )
+        return "\n".join(observations) or "无"
+
+    def _final_answer_messages(
+            self,
+            *,
+            question: str,
+            context: str,
+            agent_steps: list[dict],
+            planning_note: str,
+    ) -> list[dict[str, str]]:
+        user_prompt = prompt_registry.render(
+            "fallback_summary_user",
+            context=context or "无",
+            question=question,
+            observations=self._observations_text(agent_steps),
+        )
+        if planning_note:
+            user_prompt = f"{user_prompt}\n\n补充要求：{planning_note}"
+
+        return [
+            {"role": "system", "content": prompt_registry.render("fallback_summary_system")},
+            {"role": "user", "content": user_prompt},
+        ]
 
     def _build_result(
             self,
@@ -167,7 +242,13 @@ class AgentOrchestrator:
             f"可追问：你可以把问题改成更具体的子问题，例如“{question} 的核心概念是什么？”。"
         )
 
-    def _run_core(self, question: str, context: str = ""):
+    def _run_core(
+            self,
+            question: str,
+            context: str = "",
+            access_context: AccessContext | None = None,
+            stream_final_answer: bool = False,
+    ):
         messages = self._build_messages(question=question, context=context)
         tool_calls: list[dict] = []
         agent_steps: list[dict] = []
@@ -219,7 +300,11 @@ class AgentOrchestrator:
                         }
                         attempts = [{"attempt": 1, "success": False, "error": parse_error}]
                     else:
-                        observation, attempts = self._execute_tool_with_retry(name=item["name"], arguments=arguments)
+                        observation, attempts = self._execute_tool_with_retry(
+                            name=item["name"],
+                            arguments=arguments,
+                            access_context=access_context,
+                        )
 
                     tool_call = {
                         "tool_name": item["name"],
@@ -250,7 +335,7 @@ class AgentOrchestrator:
 
             final_text = planning_note or ""
             if final_text.startswith("CLARIFICATION:"):
-                clarification_question = final_text.split(":", 1)[1].strip() or "你想重点准备哪一类面试知识点？"
+                clarification_question: str = final_text.split(":", 1)[1].strip() or "你想重点准备哪一类面试知识点？"
                 result = self._build_result(
                     answer=clarification_question,
                     route="clarification",
@@ -267,15 +352,56 @@ class AgentOrchestrator:
                 yield {"type": "final", "result": result}
                 return
 
+            final_step = {
+                "step": step_index,
+                "thought": planning_note or "信息已足够，生成最终答案",
+                "action": "final_answer",
+            }
+
+            if stream_final_answer:
+                streamed_chunks: list[str] = []
+                try:
+                    for delta in llm_client.chat_messages_stream(
+                            self._final_answer_messages(
+                                question=question,
+                                context=context,
+                                agent_steps=agent_steps,
+                                planning_note=planning_note,
+                            )
+                    ):
+                        streamed_chunks.append(delta)
+                        yield {"type": "answer_delta", "delta": delta}
+                except GovernanceError as exc:
+                    result = self._build_result(
+                        answer=self._deterministic_degraded_answer(question=question, agent_steps=agent_steps, reason=str(exc)),
+                        route="agent_answer",
+                        tool_calls=tool_calls,
+                        agent_steps=agent_steps + [final_step],
+                        citations=citations,
+                        fallback=True,
+                    )
+                    yield {"type": "final", "result": result}
+                    return
+
+                final_answer = "".join(streamed_chunks).strip()
+                if not final_answer:
+                    final_answer = self._fallback_answer(question, context, agent_steps)
+
+                result = self._build_result(
+                    answer=final_answer,
+                    route="agent_answer",
+                    tool_calls=tool_calls,
+                    agent_steps=agent_steps + [final_step],
+                    citations=citations,
+                )
+                yield {"type": "final", "result": result}
+                return
+
             result = self._build_result(
                 answer=final_text or self._fallback_answer(question, context, agent_steps),
                 route="agent_answer",
                 tool_calls=tool_calls,
-                agent_steps=agent_steps + [{
-                    "step": step_index,
-                    "thought": planning_note or "信息已足够，生成最终答案",
-                    "action": "final_answer",
-                }],
+                agent_steps=agent_steps + [final_step],
                 citations=citations,
             )
             yield {"type": "final", "result": result}
@@ -292,16 +418,21 @@ class AgentOrchestrator:
         yield {"type": "final", "result": result}
 
     @traceable(name="agent_orchestrator_run")
-    def run(self, question: str, context: str = "") -> AgentResult:
-        for event in self._run_core(question=question, context=context):
+    def run(self, question: str, context: str = "", access_context: AccessContext | None = None) -> AgentResult:
+        for event in self._run_core(question=question, context=context, access_context=access_context):
             if event["type"] == "final":
                 return event["result"]
         raise RuntimeError("Agent did not produce a final result")
 
     @traceable(name="agent_orchestrator_stream")
-    def run_stream(self, question: str, context: str = ""):
+    def run_stream(self, question: str, context: str = "", access_context: AccessContext | None = None):
         yield {"type": "start", "question": question}
-        yield from self._run_core(question=question, context=context)
+        yield from self._run_core(
+            question=question,
+            context=context,
+            access_context=access_context,
+            stream_final_answer=True,
+        )
 
 
 agent_orchestrator = AgentOrchestrator()

@@ -19,6 +19,15 @@ def list_prompts():
     }
 
 
+@router.post("/reload")
+def reload_prompts():
+    prompt_registry.reload()
+    return {
+        "status": "ok",
+        "active_versions": prompt_registry.active_versions(),
+    }
+
+
 @router.get("/{name}")
 def get_prompt(name: str):
     try:
