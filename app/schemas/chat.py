@@ -23,8 +23,9 @@ class ToolCall(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     route: str
-    citations: List[Citation] = []
-    tool_calls: List[ToolCall] = []
+    citations: List[Citation] = Field(default_factory=list)
+    tool_calls: List[ToolCall] = Field(default_factory=list)
+    agent_steps: List[dict] = Field(default_factory=list)
     session_id: str
     need_clarification: bool = False
     clarification_question: Optional[str] = None

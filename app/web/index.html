@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Knowledge Agent UI</title>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #121933;
+      --panel-soft: #1a2243;
+      --panel-hover: #202a52;
+      --text: #edf1ff;
+      --subtle: #98a4d5;
+      --border: rgba(255,255,255,.1);
+      --accent: #7a9bff;
+      --success: #2dc997;
+      --danger: #ff6b81;
+      --user: #2e4bbd;
+      --assistant: #1b2f57;
+      --tool: #193b30;
+      --error: #64293a;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: radial-gradient(circle at top, #13204b 0%, #0a1022 45%, #080d18 100%);
+      color: var(--text);
+    }
+    .app {
+      display: grid;
+      grid-template-columns: 300px 1fr 360px;
+      min-height: 100vh;
+      gap: 16px;
+      padding: 16px;
+    }
+    .panel {
+      background: rgba(18, 25, 51, 0.9);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      overflow: hidden;
+      box-shadow: 0 16px 40px rgba(0,0,0,.25);
+      backdrop-filter: blur(16px);
+    }
+    .sidebar, .inspector { display: flex; flex-direction: column; }
+    .panel-header {
+      padding: 18px 18px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .title { margin: 0; font-size: 18px; }
+    .subtitle { margin: 6px 0 0; color: var(--subtle); font-size: 13px; line-height: 1.6; }
+    .sidebar-actions {
+      padding: 14px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .btn {
+      border: 0;
+      border-radius: 12px;
+      padding: 10px 14px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: .2s ease;
+    }
+    .btn.primary { background: linear-gradient(135deg, #7a9bff, #5775e8); color: white; }
+    .btn.secondary { background: rgba(255,255,255,.06); color: var(--text); }
+    .btn.danger { background: rgba(255,107,129,.16); color: #ff9ead; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .sessions {
+      flex: 1;
+      overflow: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .session-item {
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(255,255,255,.03);
+      cursor: pointer;
+    }
+    .session-item.active, .session-item:hover { background: var(--panel-hover); }
+    .session-item h4 { margin: 0 0 6px; font-size: 14px; }
+    .session-item p { margin: 0; color: var(--subtle); font-size: 12px; line-height: 1.5; }
+    .session-meta { margin-top: 8px; display: flex; justify-content: space-between; color: var(--subtle); font-size: 11px; }
+    .chat {
+      display: flex;
+      flex-direction: column;
+      min-height: calc(100vh - 32px);
+    }
+    .chat-top {
+      padding: 18px 22px 14px;
+      border-bottom: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field label { font-size: 12px; color: var(--subtle); }
+    .field input, .composer textarea {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(255,255,255,.03);
+      color: var(--text);
+      outline: none;
+    }
+    .messages {
+      flex: 1;
+      overflow: auto;
+      padding: 18px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .bubble {
+      max-width: 88%;
+      padding: 14px 16px;
+      border-radius: 16px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-word;
+      border: 1px solid rgba(255,255,255,.08);
+    }
+    .bubble.user { align-self: flex-end; background: var(--user); }
+    .bubble.assistant { align-self: flex-start; background: var(--assistant); }
+    .bubble.tool { align-self: flex-start; background: var(--tool); font-size: 13px; }
+    .bubble.error { align-self: flex-start; background: var(--error); }
+    .composer {
+      border-top: 1px solid var(--border);
+      padding: 18px 22px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .composer textarea { min-height: 130px; resize: vertical; }
+    .composer-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .checkbox { display: inline-flex; align-items: center; gap: 8px; color: var(--subtle); font-size: 13px; }
+    .hint { color: var(--subtle); font-size: 12px; }
+    .inspector-content {
+      flex: 1;
+      overflow: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .status-box, .inspect-card {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(255,255,255,.03);
+      padding: 14px;
+    }
+    .status-box strong { display: block; margin-bottom: 6px; }
+    .status-box p, .inspect-card p { margin: 0; color: var(--subtle); font-size: 13px; line-height: 1.7; }
+    .inspect-card h3 { margin: 0 0 10px; font-size: 14px; }
+    .json {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #d6defd;
+    }
+    .empty { color: var(--subtle); font-size: 13px; text-align: center; padding: 24px 12px; }
+    @media (max-width: 1180px) {
+      .app { grid-template-columns: 1fr; }
+      .chat { min-height: auto; }
+    }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const { createApp, ref, reactive, computed, onMounted, nextTick } = Vue;
+
+createApp({
+  setup() {
+    const sessions = ref([]);
+    const messages = ref([
+      { id: 'welcome', role: 'assistant', content: '你好，我是当前项目的 Agent UI。你现在可以直接体验数据库知识检索、工具调用、流式回答和历史会话能力。' }
+    ]);
+    const toolCalls = ref([]);
+    const agentSteps = ref([]);
+    const loading = ref(false);
+    const status = ref('准备就绪');
+    const streamMode = ref(true);
+    const question = ref('');
+    const userId = ref('demo-user');
+    const sessionId = ref('session-' + Math.random().toString(36).slice(2, 10));
+    const activeSessionId = ref('');
+    const messagesEl = ref(null);
+
+    const canSend = computed(() => !loading.value && question.value.trim().length > 0);
+
+    function scrollToBottom() {
+      nextTick(() => {
+        if (messagesEl.value) {
+          messagesEl.value.scrollTop = messagesEl.value.scrollHeight;
+        }
+      });
+    }
+
+    function resetInspectors() {
+      toolCalls.value = [];
+      agentSteps.value = [];
+    }
+
+    function addMessage(role, content) {
+      messages.value.push({ id: crypto.randomUUID(), role, content });
+      scrollToBottom();
+    }
+
+    async function fetchSessions() {
+      const res = await fetch('/sessions');
+      const data = await res.json();
+      sessions.value = data.sessions || [];
+    }
+
+    async function loadSession(session) {
+      activeSessionId.value = session.session_id;
+      sessionId.value = session.session_id;
+      userId.value = session.user_id || 'demo-user';
+      status.value = '正在加载历史消息…';
+      const res = await fetch(`/sessions/${encodeURIComponent(session.session_id)}/messages`);
+      const data = await res.json();
+      messages.value = (data.messages || []).map(item => ({
+        id: item.id,
+        role: item.role,
+        content: item.content,
+      }));
+      status.value = `已加载会话 ${session.session_id}`;
+      resetInspectors();
+      scrollToBottom();
+    }
+
+    async function deleteSession(session) {
+      await fetch(`/sessions/${encodeURIComponent(session.session_id)}`, { method: 'DELETE' });
+      if (activeSessionId.value === session.session_id) {
+        startNewSession();
+      }
+      await fetchSessions();
+    }
+
+    function startNewSession() {
+      activeSessionId.value = '';
+      sessionId.value = 'session-' + Math.random().toString(36).slice(2, 10);
+      messages.value = [
+        { id: 'welcome-' + Date.now(), role: 'assistant', content: '新会话已创建。你可以继续向 Agent 提问。' }
+      ];
+      resetInspectors();
+      status.value = '新会话已创建';
+    }
+
+    async function sendNormal(payload) {
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(`请求失败：${res.status}`);
+      const data = await res.json();
+      addMessage('assistant', data.answer || '(无返回)');
+      toolCalls.value = data.tool_calls || [];
+      agentSteps.value = data.agent_steps || [];
+      status.value = `已完成 · route=${data.route}`;
+    }
+
+    function parseSseBuffer(buffer) {
+      const events = [];
+      const parts = buffer.split('\n\n');
+      const rest = parts.pop();
+      for (const part of parts) {
+        const line = part.split('\n').find(item => item.startsWith('data: '));
+        if (!line) continue;
+        try {
+          events.push(JSON.parse(line.slice(6)));
+        } catch (_) {}
+      }
+      return { events, rest };
+    }
+
+    async function sendStream(payload) {
+      const res = await fetch('/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok || !res.body) throw new Error(`流式请求失败：${res.status}`);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parsed = parseSseBuffer(buffer);
+        buffer = parsed.rest;
+
+        for (const event of parsed.events) {
+          if (event.type === 'start') {
+            status.value = 'Agent 已启动，正在规划步骤…';
+          } else if (event.type === 'tool_result') {
+            messages.value.push({
+              id: crypto.randomUUID(),
+              role: 'tool',
+              content: `工具：${event.action}\n输入：${JSON.stringify(event.action_input, null, 2)}\n观察：${JSON.stringify(event.observation, null, 2)}`
+            });
+            scrollToBottom();
+          } else if (event.type === 'final') {
+            const result = event.result;
+            addMessage('assistant', result.answer || '(无返回)');
+            toolCalls.value = result.tool_calls || [];
+            agentSteps.value = result.agent_steps || [];
+            status.value = `已完成 · route=${result.route}`;
+          }
+        }
+      }
+    }
+
+    async function submit() {
+      const text = question.value.trim();
+      if (!text || loading.value) return;
+      const payload = {
+        user_id: userId.value.trim() || 'demo-user',
+        session_id: sessionId.value.trim() || ('session-' + Math.random().toString(36).slice(2, 10)),
+        question: text,
+      };
+
+      sessionId.value = payload.session_id;
+      activeSessionId.value = payload.session_id;
+      addMessage('user', text);
+      question.value = '';
+      resetInspectors();
+      loading.value = true;
+      status.value = '正在请求 Agent…';
+
+      try {
+        if (streamMode.value) {
+          await sendStream(payload);
+        } else {
+          await sendNormal(payload);
+        }
+        await fetchSessions();
+      } catch (error) {
+        addMessage('error', error?.message || String(error));
+        status.value = '请求失败';
+      } finally {
+        loading.value = false;
+      }
+    }
+
+    onMounted(async () => {
+      await fetchSessions();
+      scrollToBottom();
+    });
+
+    return {
+      sessions,
+      messages,
+      toolCalls,
+      agentSteps,
+      loading,
+      status,
+      streamMode,
+      question,
+      userId,
+      sessionId,
+      activeSessionId,
+      canSend,
+      messagesEl,
+      submit,
+      startNewSession,
+      loadSession,
+      deleteSession,
+      fetchSessions,
+      jsonText: (value) => JSON.stringify(value ?? [], null, 2),
+    };
+  },
+  template: `
+    <div class="app">
+      <aside class="panel sidebar">
+        <div class="panel-header">
+          <h1 class="title">Knowledge Agent UI</h1>
+          <p class="subtitle">Vue 3 驱动的简易产品化前端，支持历史会话、流式问答、工具调用观察与 Agent steps 查看。</p>
+        </div>
+        <div class="sidebar-actions">
+          <button class="btn primary" @click="startNewSession">+ 新建会话</button>
+          <button class="btn secondary" @click="fetchSessions">刷新会话列表</button>
+        </div>
+        <div class="sessions">
+          <div v-if="!sessions.length" class="empty">当前还没有历史会话，先发起一次问答吧。</div>
+          <div
+            v-for="session in sessions"
+            :key="session.session_id"
+            class="session-item"
+            :class="{ active: session.session_id === activeSessionId }"
+            @click="loadSession(session)"
+          >
+            <h4>{{ session.session_id }}</h4>
+            <p>{{ session.last_message || '暂无内容' }}</p>
+            <div class="session-meta">
+              <span>{{ session.user_id }}</span>
+              <span>{{ session.message_count }} 条</span>
+            </div>
+            <div class="session-meta">
+              <span>{{ session.last_role }}</span>
+              <button class="btn danger" style="padding:4px 8px;font-size:11px;" @click.stop="deleteSession(session)">删除</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="panel chat">
+        <div class="chat-top">
+          <div class="field">
+            <label>user_id</label>
+            <input v-model="userId" />
+          </div>
+          <div class="field">
+            <label>session_id</label>
+            <input v-model="sessionId" />
+          </div>
+          <div class="field">
+            <label>模式</label>
+            <label class="checkbox"><input type="checkbox" v-model="streamMode" /> 使用流式问答</label>
+          </div>
+        </div>
+
+        <div ref="messagesEl" class="messages">
+          <div v-for="message in messages" :key="message.id" class="bubble" :class="message.role">
+            {{ message.content }}
+          </div>
+        </div>
+
+        <div class="composer">
+          <textarea v-model="question" @keydown.ctrl.enter.prevent="submit" @keydown.meta.enter.prevent="submit" placeholder="例如：请基于当前知识库介绍一下调优检索的核心思路，或解释当前项目里 Agent 是怎么工作的"></textarea>
+          <div class="composer-actions">
+            <div class="hint">Ctrl/Cmd + Enter 可快速发送。当前主流程已接回 Markdown + embedding + pgvector。</div>
+            <button class="btn primary" :disabled="!canSend" @click="submit">{{ loading ? '处理中…' : '发送问题' }}</button>
+          </div>
+        </div>
+      </main>
+
+      <aside class="panel inspector">
+        <div class="panel-header">
+          <h2 class="title">运行面板</h2>
+          <p class="subtitle">查看当前状态、工具调用和 Agent 中间步骤，帮助你理解真实 Agent 的工作过程。</p>
+        </div>
+        <div class="inspector-content">
+          <div class="status-box">
+            <strong>当前状态</strong>
+            <p>{{ status }}</p>
+          </div>
+          <div class="inspect-card">
+            <h3>工具调用</h3>
+            <pre class="json">{{ jsonText(toolCalls) }}</pre>
+          </div>
+          <div class="inspect-card">
+            <h3>Agent Steps</h3>
+            <pre class="json">{{ jsonText(agentSteps) }}</pre>
+          </div>
+        </div>
+      </aside>
+    </div>
+  `,
+}).mount('#app');
+</script>
+</body>
+</html>
+
+

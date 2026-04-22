@@ -1,5 +1,5 @@
 import json
-from sqlalchemy import delete, text
+from sqlalchemy import delete, select, text
 from app.db.session import SessionLocal
 from app.models.kb_chunk import KBChunk
 
@@ -18,6 +18,16 @@ class KBChunkRepo:
         with SessionLocal() as db:
             db.bulk_insert_mappings(KBChunk, rows)
             db.commit()
+
+    def list_by_document_id(self, document_id: int, limit: int = 6) -> list[KBChunk]:
+        with SessionLocal() as db:
+            stmt = (
+                select(KBChunk)
+                .where(KBChunk.document_id == document_id)
+                .order_by(KBChunk.chunk_index.asc())
+                .limit(limit)
+            )
+            return list(db.execute(stmt).scalars().all())
 
     def search_by_vector(self, query_vector: list[float], top_k: int = 5) -> list[dict]:
         query_vector_str = json.dumps(query_vector)
