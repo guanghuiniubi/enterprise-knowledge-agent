@@ -16,6 +16,31 @@ class PlanRecord:
     reasoning_summary: str
     search_queries: list[str] = field(default_factory=list)
     tools_to_consider: list[str] = field(default_factory=list)
+    template_id: str = "general_interview"
+    candidate_template_ids: list[str] = field(default_factory=list)
+    candidate_details: list["PlanCandidateRecord"] = field(default_factory=list)
+    selection_strategy: str = "rule_based"
+    selection_reason: str = ""
+    selection_confidence: float | None = None
+    fallback_used: bool = False
+    route_trace: list["RouteTraceRecord"] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class PlanCandidateRecord:
+    template_id: str
+    score: int | None = None
+    priority: int | None = None
+    matched_keywords: list[str] = field(default_factory=list)
+    selected: bool = False
+    rejected_reason: str | None = None
+
+
+@dataclass(slots=True)
+class RouteTraceRecord:
+    stage: str
+    message: str
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

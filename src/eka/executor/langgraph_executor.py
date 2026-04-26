@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, TypedDict, cast
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
@@ -52,7 +52,7 @@ class LangGraphAgentExecutor(BaseExecutor):
         self.graph = self._build_graph()
 
     def invoke(self, user_input: str, session_id: str = "default") -> ExecutionResult:
-        state = self.graph.invoke({"session_id": session_id, "user_input": user_input})
+        state = self.graph.invoke(self._initial_state(user_input=user_input, session_id=session_id))
         return ExecutionResult(
             session_id=session_id,
             answer=state.get("final_answer", ""),
@@ -62,14 +62,23 @@ class LangGraphAgentExecutor(BaseExecutor):
             trace=state.get("trace", []),
         )
 
+    def stream(self, user_input: str, session_id: str = "default"):
+        for chunk in self.graph.stream(
+            self._initial_state(user_input=user_input, session_id=session_id),
+            stream_mode="updates",
+        ):
+            for node_state in chunk.values():
+                for event in node_state.get("trace", []):
+                    yield event
+
     def _build_graph(self):
-        builder = StateGraph(InterviewGraphState)
-        builder.add_node("load_context", self._load_context)
-        builder.add_node("plan", self._plan)
-        builder.add_node("retrieve", self._retrieve)
-        builder.add_node("assistant", self._assistant)
+        builder = StateGraph(cast(Any, InterviewGraphState))
+        builder.add_node("load_context", cast(Any, self._load_context))
+        builder.add_node("plan", cast(Any, self._plan))
+        builder.add_node("retrieve", cast(Any, self._retrieve))
+        builder.add_node("assistant", cast(Any, self._assistant))
         builder.add_node("tools", self.tool_node)
-        builder.add_node("finalize", self._finalize)
+        builder.add_node("finalize", cast(Any, self._finalize))
 
         builder.add_edge(START, "load_context")
         builder.add_edge("load_context", "plan")
@@ -86,6 +95,9 @@ class LangGraphAgentExecutor(BaseExecutor):
         builder.add_edge("tools", "assistant")
         builder.add_edge("finalize", END)
         return builder.compile()
+
+    def _initial_state(self, *, user_input: str, session_id: str) -> InterviewGraphState:
+        return {"session_id": session_id, "user_input": user_input}
 
     def _load_context(self, state: InterviewGraphState) -> dict[str, Any]:
         history = self.memory.load(state["session_id"])
@@ -111,6 +123,27 @@ class LangGraphAgentExecutor(BaseExecutor):
                     message=plan.reasoning_summary,
                     data={
                         "objective": plan.objective,
+                        "template_id": plan.template_id,
+                        "candidate_template_ids": plan.candidate_template_ids,
+                        "candidate_details": [
+                            {
+                                "template_id": item.template_id,
+                                "score": item.score,
+                                "priority": item.priority,
+                                "matched_keywords": item.matched_keywords,
+                                "selected": item.selected,
+                                "rejected_reason": item.rejected_reason,
+                            }
+                            for item in plan.candidate_details
+                        ],
+                        "selection_strategy": plan.selection_strategy,
+                        "selection_reason": plan.selection_reason,
+                        "selection_confidence": plan.selection_confidence,
+                        "fallback_used": plan.fallback_used,
+                        "route_trace": [
+                            {"stage": item.stage, "message": item.message, "data": item.data}
+                            for item in plan.route_trace
+                        ],
                         "search_queries": plan.search_queries,
                         "tools_to_consider": plan.tools_to_consider,
                     },
@@ -133,16 +166,17 @@ class LangGraphAgentExecutor(BaseExecutor):
         }
 
     def _assistant(self, state: InterviewGraphState) -> dict[str, Any]:
-        bound_model = self.chat_model.bind_tools(self.langchain_tools)
+        bound_model = self.chat_model.bind_tools(self.langchain_tools) if self.langchain_tools else self.chat_model
         prompt_messages = self._build_prompt_messages(state)
         response = bound_model.invoke(prompt_messages)
-        tool_names = [call.get("name", "unknown") for call in getattr(response, "tool_calls", [])]
+        tool_calls = getattr(response, "tool_calls", [])
+        tool_names = [call.get("name", "unknown") for call in tool_calls]
         if tool_names:
             message = f"Model decided to call tools: {', '.join(tool_names)}."
-            data = {"tool_calls": tool_names}
+            data = {"tool_calls": tool_calls}
         else:
             message = "Model produced a final answer without additional tool calls."
-            data = {"tool_calls": []}
+            data = {"tool_calls": [], "response_preview": self._coerce_text(response.content)[:300]}
         return {
             "messages": [response],
             "trace": [TraceEvent(stage="assistant", message=message, data=data)],
@@ -196,7 +230,14 @@ class LangGraphAgentExecutor(BaseExecutor):
                 [
                     f"- Plan objective: {plan.objective}",
                     f"- Plan summary: {plan.reasoning_summary}",
-                    f"- Suggested tools: {', '.join(plan.tools_to_consider)}",
+                    f"- Plan template: {plan.template_id}",
+                    f"- Plan candidates: {', '.join(plan.candidate_template_ids) if plan.candidate_template_ids else 'None'}",
+                    f"- Plan route strategy: {plan.selection_strategy}",
+                    f"- Plan route reason: {plan.selection_reason or 'None'}",
+                    f"- Plan route confidence: {plan.selection_confidence if plan.selection_confidence is not None else 'None'}",
+                    f"- Plan fallback used: {plan.fallback_used}",
+                    f"- Suggested tools: {', '.join(plan.tools_to_consider) if plan.tools_to_consider else 'None'}",
+                    f"- Search queries: {', '.join(plan.search_queries) if plan.search_queries else 'None'}",
                 ]
             )
         if retrieved_docs:
@@ -219,7 +260,9 @@ class LangGraphAgentExecutor(BaseExecutor):
         for message in messages:
             if isinstance(message, AIMessage):
                 for call in message.tool_calls:
-                    tool_inputs_by_id[call["id"]] = (call["name"], call.get("args", {}))
+                    call_id = call.get("id")
+                    if call_id:
+                        tool_inputs_by_id[call_id] = (call["name"], call.get("args", {}))
 
         records: list[ToolCallRecord] = []
         for message in messages:

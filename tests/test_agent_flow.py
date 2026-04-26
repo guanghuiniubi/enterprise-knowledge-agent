@@ -105,3 +105,17 @@ def test_agent_keeps_multi_turn_history_in_same_session():
 	assert second.trace[0].stage == "session"
 	assert "2 historical messages" in second.trace[0].message
 
+
+def test_agent_stream_exposes_trace_events_in_order():
+	model = FakeToolAwareChatModel([AIMessage(content="流式回答")])
+	agent, _ = build_agent(model)
+
+	events = list(agent.stream("帮我总结 Agent 面试重点", session_id="stream"))
+
+	assert events
+	assert events[0].stage == "session"
+	assert any(event.stage == "plan" for event in events)
+	assert any(event.stage == "retrieve" for event in events)
+	assert events[-1].stage == "finalize"
+
+

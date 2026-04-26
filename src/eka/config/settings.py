@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     llm_base_url: str | None = Field(default=None, validation_alias="LLM_BASE_URL")
     llm_api_key: str | None = Field(default=None, validation_alias="LLM_API_KEY")
     llm_temperature: float = Field(default=0.2, validation_alias="LLM_TEMPERATURE")
+    llm_timeout: float = Field(default=60.0, validation_alias="LLM_TIMEOUT")
+    llm_max_retries: int = Field(default=2, validation_alias="LLM_MAX_RETRIES")
+    llm_max_tokens: int | None = Field(default=None, validation_alias="LLM_MAX_TOKENS")
 
     langsmith_tracing: bool = Field(default=False, validation_alias="LANGSMITH_TRACING")
     langsmith_api_key: str | None = Field(default=None, validation_alias="LANGSMITH_API_KEY")
@@ -41,6 +44,10 @@ class Settings(BaseSettings):
     knowledge_base_path: Path | None = Field(default=None, validation_alias="KNOWLEDGE_BASE_PATH")
     embedding_model_name: str = Field(default="BAAI/bge-small-zh-v1.5", validation_alias="EMBEDDING_MODEL_NAME")
     embedding_dimension: int = Field(default=512, validation_alias="EMBEDDING_DIMENSION")
+
+    @property
+    def normalized_llm_provider(self) -> str:
+        return self.llm_provider.lower().strip()
 
     @property
     def postgres_dsn(self) -> str:

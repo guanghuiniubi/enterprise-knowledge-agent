@@ -5,6 +5,7 @@
 ## 当前能力
 
 - 使用 `pydantic-settings` 从 `.env` 加载配置
+- 支持使用 OpenAI-compatible client 接入 Xiaomi 大模型（默认 `mimo-v2-pro`）
 - 基于统一抽象定义可扩展组件：
   - `BaseAgent`
   - `BaseTool`
@@ -20,6 +21,7 @@
   - LLM 决策与工具调用
   - 生成最终回答
   - 保存多轮记忆
+- 支持展示安全的可观察执行过程：`plan summary`、检索结果、工具调用轨迹、阶段性 trace
 - 提供最小可运行的命令行入口与 FastAPI 接口
 - 提供测试样例，便于继续扩展
 
@@ -65,6 +67,21 @@ cp .env.example .env
 
 当前项目会自动从工作区下的 `.env` 读取配置。
 
+如果你使用的是 Xiaomi 大模型，可以直接填写：
+
+```dotenv
+LLM_PROVIDER=xiaomi
+LLM_MODEL=mimo-v2-pro
+LLM_BASE_URL=https://api.xiaomimimo.com/v1
+LLM_API_KEY=your_xiaomi_api_key
+LLM_TEMPERATURE=0.2
+LLM_TIMEOUT=60
+LLM_MAX_RETRIES=2
+LLM_MAX_TOKENS=
+```
+
+当前实现会通过 `langchain-openai` 的 `ChatOpenAI` 作为 OpenAI-compatible client 来访问 Xiaomi 接口。
+
 ### 3. 运行命令行 Demo
 
 ```bash
@@ -102,6 +119,13 @@ uv run pytest
 4. 将计划摘要 + 检索结果作为上下文交给模型
 5. 模型按需调用工具
 6. 汇总最终回答并写入会话记忆
+
+## Xiaomi / OpenAI-compatible 模型说明
+
+- `LLM_PROVIDER=xiaomi` 时，会自动按 OpenAI-compatible 方式构建聊天模型
+- 若未显式设置 `LLM_BASE_URL`，默认会使用 `https://api.xiaomimimo.com/v1`
+- 当前 Provider 工厂位于 `src/eka/config/providers.py`
+- 你也可以继续扩展更多 OpenAI-compatible 提供商，而不需要改动 Agent 主流程
 
 ## 下一步扩展建议
 

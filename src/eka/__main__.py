@@ -25,17 +25,63 @@ def format_trace(trace: list[object]) -> str:
 
 def render_answer(result) -> str:
 	plan_summary = result.plan.reasoning_summary if result.plan else "无"
+	candidate_details = (
+		"\n".join(
+			f"- {item.template_id}: score={item.score}, keywords={', '.join(item.matched_keywords) if item.matched_keywords else '无'}, selected={item.selected}, rejected_reason={item.rejected_reason or '无'}"
+			for item in result.plan.candidate_details
+		)
+		if result.plan and result.plan.candidate_details
+		else "- 无"
+	)
+	route_trace_details = (
+		"\n".join(
+			f"- {item.stage}: {item.message}"
+			for item in result.plan.route_trace
+		)
+		if result.plan and result.plan.route_trace
+		else "- 无"
+	)
+	route_details = (
+		"\n".join(
+			[
+				f"- Template: {result.plan.template_id}",
+				f"- Candidates: {', '.join(result.plan.candidate_template_ids) if result.plan.candidate_template_ids else '无'}",
+				f"- Strategy: {result.plan.selection_strategy}",
+				f"- Confidence: {result.plan.selection_confidence if result.plan.selection_confidence is not None else '无'}",
+				f"- Fallback: {result.plan.fallback_used}",
+				f"- Reason: {result.plan.selection_reason or '无'}",
+			]
+		)
+		if result.plan
+		else "- 无"
+	)
 	docs = "\n".join(
 		f"- {doc.metadata.get('filename', doc.source)} (score={doc.score:.2f})"
 		for doc in result.retrieved_docs
+	) or "- 无"
+	tool_calls = "\n".join(
+		f"- {item.tool_name}: input={item.tool_input}"
+		for item in result.tool_calls
 	) or "- 无"
 	return textwrap.dedent(
 		f"""
 		[Plan Summary]
 		{plan_summary}
 
+		[Plan Route]
+		{route_details}
+
+		[Plan Candidates]
+		{candidate_details}
+
+		[Plan Route Trace]
+		{route_trace_details}
+
 		[Retrieved Docs]
 		{docs}
+
+		[Tool Calls]
+		{tool_calls}
 
 		[Answer]
 		{result.answer}
