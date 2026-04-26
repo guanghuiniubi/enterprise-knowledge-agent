@@ -107,12 +107,13 @@ def test_router_planner_uses_rule_fallback_when_llm_rerank_is_invalid_but_candid
     )
     planner = RouterPlanner.default(chat_model=model)
 
-    plan = planner.create_plan("请帮我优化这段回答并给 feedback", history=[])
+    plan = planner.create_plan("请帮我准备一段面试回答，并继续优化这段回答给 feedback", history=[])
 
     assert plan.template_id == "answer_review"
     assert plan.selection_strategy == "rule_based_fallback"
     assert plan.fallback_used is True
     assert any(item.stage == "llm_rerank_failed" for item in plan.route_trace)
+    assert len(plan.candidate_details) > 1
     assert any(item.rejected_reason for item in plan.candidate_details if item.template_id != plan.template_id)
 
 

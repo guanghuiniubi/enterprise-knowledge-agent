@@ -13,6 +13,16 @@ from eka.core.types import MessageRecord, PlanCandidateRecord, PlanRecord, Route
 
 @dataclass(slots=True)
 class TemplateCandidate:
+    """A recalled candidate before final planner selection.
+
+    你可以把它理解成“候选模板卡片”：
+    - `template_id`：候选模板是谁
+    - `score`：规则召回阶段给它打了多少分
+    - `priority`：模板自己的静态优先级
+    - `matched_keywords`：它是因为什么关键词被召回的
+
+    注意它还不是最终选择结果，只是进入 rerank / fallback 阶段的候选集。
+    """
     template_id: str
     score: int
     priority: int
@@ -21,6 +31,19 @@ class TemplateCandidate:
 
 @dataclass(slots=True)
 class RouteDecision:
+    """Final routing decision passed into the selected plan template.
+
+    一旦 RouterPlanner 决定了“最终采用哪个模板”，就会把决定结果放进这个对象里。
+    这个对象除了记录最终模板，还会把整个路由过程里最关键的信息带下去：
+    - 候选模板有哪些
+    - 是通过什么策略选中的（rule / rerank / fallback）
+    - 原因是什么
+    - 是否发生了回退
+    - 候选详情和 route trace 是什么
+
+    这样 template 在生成 `PlanRecord` 时，就能把这些元数据一起写进去，
+    后续 CLI / Trace / API / Eval 都能复用。
+    """
     template_id: str
     selection_strategy: str
     selection_reason: str
@@ -33,12 +56,37 @@ class RouteDecision:
 
 @dataclass(slots=True)
 class LLMRouteOutcome:
+    """Wrapper for LLM rerank results.
+
+    为什么不直接返回 `RouteDecision | None`？
+    因为真实工程里“没选出来”也很重要：
+    - 是模型不支持 structured output？
+    - 是调用失败？
+    - 是置信度太低？
+    - 还是模型选了非法模板？
+
+    `failure_reason` 会被写入 route trace，帮助你调试 rerank 的失败原因。
+    """
     decision: RouteDecision | None
     failure_reason: str | None = None
 
 
 class BasePlanTemplate(ABC):
-    """Base abstraction for reusable plan templates."""
+    """Base abstraction for reusable plan templates.
+
+    这里的 template 不是“具体执行图”，而是“某一类规划任务的骨架”。
+    例如：
+    - `general_interview`
+    - `star_story`
+    - `answer_review`
+    - `preparation_checklist`
+
+    每个 template 负责：
+    - 定义自己的语义定位（description / route_keywords / priority）
+    - 被选中后把请求构造成统一的 `PlanRecord`
+
+    这样可以把“选哪个模板”和“模板内部如何构造 plan”拆开。
+    """
 
     template_id: str
     description: str
@@ -68,9 +116,14 @@ class TemplateRegistry:
         self._templates_by_id = {template.template_id: template for template in templates}
 
     def all(self) -> list[BasePlanTemplate]:
+        """Return all registered templates.
+
+        recall 阶段会对整个 registry 做扫描，因此这里返回的是“全集”。
+        """
         return list(self._templates)
 
     def get(self, template_id: str) -> BasePlanTemplate:
+        """Get a template by id, raising a clear error if it is missing."""
         try:
             return self._templates_by_id[template_id]
         except KeyError as exc:
@@ -92,7 +145,19 @@ class InterviewPlanTemplate(BasePlanTemplate):
     extra_search_queries: tuple[str, ...] = ()
 
     def build_plan(self, user_input: str, history: list[MessageRecord], decision: RouteDecision) -> PlanRecord:
+        """Turn the final route decision into a unified `PlanRecord`.
+
+        这里是“模板执行阶段”，不是“路由阶段”。
+        Router 已经决定了当前请求属于哪个模板；
+        这个函数只负责把模板自己的风格和重点，组合成标准化的 `PlanRecord`。
+
+        统一结构的好处是：
+        - `LangGraphExecutor` 不需要关心模板细节
+        - 后续替换 planner / template 时，对 executor 基本透明
+        - trace / CLI / API 的消费方式也保持一致
+        """
         recent_context = "；".join(message.content for message in history[-2:]) if history else "无历史上下文"
+        # search queries 同样由模板来决定，这意味着不同模板可以有不同检索策略。
         search_queries = [user_input, *self.extra_search_queries, f"AI Agent interview {user_input}"]
         reasoning_summary = (
             f"当前路由选择了模板“{self.template_id}”，"
@@ -120,7 +185,18 @@ class InterviewPlanTemplate(BasePlanTemplate):
 
 
 class RuleBasedIntentRouter:
-    """Deterministic router that recalls top-k candidate templates using keyword overlap."""
+    """Deterministic router that recalls top-k candidate templates using keyword overlap.
+
+    这里不要把它理解成“最终决策器”，它更像：
+    - 一个低成本的召回器（recall）
+    - 一个稳定的规则 fallback
+
+    在真实工程里，规则路由通常不是为了完美理解语义，
+    而是为了：
+    - 快速缩小候选范围
+    - 降低 LLM rerank 的成本
+    - 在 LLM 失败时兜底
+    """
 
     def recall(
         self,
@@ -130,6 +206,19 @@ class RuleBasedIntentRouter:
         *,
         limit: int = 3,
     ) -> list[TemplateCandidate]:
+        """Recall top-k candidate templates from all registered templates.
+
+        这一步的目标不是“100% 选对最终模板”，而是“尽量把正确模板召回来”。
+
+        逻辑非常直接：
+        1. 对每个 template 看它的 `route_keywords` 在 user_input / recent history 中命中了多少
+        2. 用命中数量作为 score
+        3. 再按 template.priority 做二次排序
+        4. 取 top-k
+
+        这是典型的工程做法：
+        先做轻量召回，再做重排序，而不是一上来就把所有模板交给大模型。
+        """
         text = self._normalize(user_input)
         history_text = self._normalize(" ".join(message.content for message in history[-3:]))
         candidates: list[TemplateCandidate] = []
@@ -156,6 +245,11 @@ class RuleBasedIntentRouter:
         return candidates[:limit]
 
     def route(self, candidates: list[TemplateCandidate]) -> RouteDecision | None:
+        """Pick the top recalled candidate as the deterministic rule-based decision.
+
+        当 LLM rerank 不存在或失败时，这个函数给出一个可落地的最终答案：
+        直接选择 recall 阶段排名第一的候选。
+        """
         if not candidates:
             return None
         top_candidate = candidates[0]
@@ -180,7 +274,18 @@ class LLMRouterSelection(BaseModel):
 
 
 class LLMIntentRouter:
-    """Semantic reranker over a pre-recalled candidate template set."""
+    """Semantic reranker over a pre-recalled candidate template set.
+
+    这个类的职责非常明确：
+    - 它不负责全量模板选择
+    - 它只对 recall 后的候选集做“重排 / 语义判别”
+
+    这比“让 LLM 直接在所有模板中选一个”更工程化，因为：
+    - 成本更低
+    - 控制更强
+    - 更容易解释失败原因
+    - 候选范围可被规则严格约束
+    """
 
     def __init__(self, model: Any, confidence_threshold: float = 0.6) -> None:
         self.model = model
@@ -193,13 +298,21 @@ class LLMIntentRouter:
         candidates: list[TemplateCandidate],
         registry: TemplateRegistry,
     ) -> LLMRouteOutcome:
+        """Rerank recalled candidates with an LLM and return either a decision or a failure reason.
+
+        这里输出的是 `LLMRouteOutcome`，而不是直接扔异常。
+        因为在真实系统中，rerank 失败是一种“正常情况”，不应该让整条链路崩掉。
+        """
         if not candidates:
             return LLMRouteOutcome(decision=None, failure_reason="No candidates available for LLM rerank.")
         if not hasattr(self.model, "with_structured_output"):
             return LLMRouteOutcome(decision=None, failure_reason="Model does not support structured output.")
 
+        # 这里要求模型必须输出结构化结果，避免脆弱的自然语言解析。
         structured_model = self.model.with_structured_output(LLMRouterSelection)
         recent_history = "\n".join(f"- {message.role}: {message.content}" for message in history[-3:]) or "- 无历史消息"
+        # 候选集不仅给 template id，还把规则分数与命中关键词一起给到模型，
+        # 这样模型是在“语义 + 规则上下文”的基础上 rerank，而不是盲选。
         candidate_catalog = "\n".join(
             (
                 f"- id={candidate.template_id}; "
@@ -231,6 +344,9 @@ class LLMIntentRouter:
         except Exception:
             return LLMRouteOutcome(decision=None, failure_reason="LLM rerank invocation failed.")
 
+        # 即使模型返回了结构化结果，我们仍然要做程序侧校验：
+        # - 选的模板是否在候选集中
+        # - 置信度是否达标
         candidate_ids = {candidate.template_id for candidate in candidates}
         if selection.template_id not in candidate_ids:
             return LLMRouteOutcome(
@@ -257,7 +373,19 @@ class LLMIntentRouter:
 
 
 class RouterPlanner(BasePlanner):
-    """Production-style planner with registry, top-k recall, LLM rerank, and fallback."""
+    """Production-style planner with registry, top-k recall, LLM rerank, and fallback.
+
+    这是当前项目里“真实工程版 planner”的核心入口。
+
+    它把 planning 拆成了 4 个阶段：
+    1. registry：有哪些模板可选
+    2. recall：先召回 top-k 候选
+    3. rerank：如果有 LLM，就对候选做语义重排
+    4. fallback：如果 rerank 不可用，就退回规则结果；如果连候选都没有，就用默认模板
+
+    这和真实检索 / 排序系统很像：
+    recall -> rerank -> fallback
+    """
 
     def __init__(
         self,
@@ -289,12 +417,31 @@ class RouterPlanner(BasePlanner):
         )
 
     def create_plan(self, user_input: str, history: list[MessageRecord]) -> PlanRecord:
+        """Create a plan through recall, optional rerank, and fallback.
+
+        这是整个 planner 最值得重点阅读的函数。
+
+        你可以把它当成一条决策流水线：
+
+        - recall：先找候选模板
+        - llm_rerank：如果可用，让 LLM 在候选中选一个
+        - rule_select：如果 LLM 失败，使用规则第一名
+        - default_fallback：如果一个候选都没有，走默认模板
+
+        同时，这个函数还会生成：
+        - `candidate_details`
+        - `route_trace`
+
+        这样后续你不仅知道“选了谁”，还知道“为什么没选别人”。
+        """
         candidates = self.rule_router.recall(
             user_input,
             history,
             self.registry.all(),
             limit=self.top_k_candidates,
         )
+
+        # base_trace 记录 recall 阶段的结构化结果，是整个 route_trace 的起点。
         base_trace = [
             RouteTraceRecord(
                 stage="rule_recall",
@@ -317,6 +464,8 @@ class RouterPlanner(BasePlanner):
         rule_decision = self.rule_router.route(candidates)
 
         if llm_decision is not None:
+            # rerank 成功时，最终决策来源于 LLM，
+            # 但 candidate_details 仍然保留规则召回信息，用于解释“候选集长什么样”。
             final_decision = RouteDecision(
                 template_id=llm_decision.template_id,
                 selection_strategy=llm_decision.selection_strategy,
@@ -345,6 +494,8 @@ class RouterPlanner(BasePlanner):
             return self.registry.get(final_decision.template_id).build_plan(user_input, history, final_decision)
 
         if rule_decision is not None:
+            # 如果 LLM 不可用、失败、低置信度或返回非法模板，
+            # 则退回 rule recall 的 top-1 结果。
             fallback_from_llm = self.llm_router is not None
             decision = RouteDecision(
                 template_id=rule_decision.template_id,
@@ -393,6 +544,7 @@ class RouterPlanner(BasePlanner):
             return self.registry.get(decision.template_id).build_plan(user_input, history, decision)
 
         fallback_decision = RouteDecision(
+            # 连候选都没有召回出来时，走系统默认模板。
             template_id=self.fallback_template_id,
             selection_strategy="fallback_default",
             selection_reason="No candidate templates recalled; using default template.",
@@ -428,6 +580,18 @@ class RouterPlanner(BasePlanner):
         selected_template_id: str,
         non_selected_reason: str,
     ) -> list[PlanCandidateRecord]:
+        """Build structured candidate records for CLI/trace/eval consumption.
+
+        这里把 recall 阶段的候选集进一步标准化：
+        - 谁被选中了
+        - 谁没被选中
+        - 没被选中的原因是什么
+
+        这一步很关键，因为后续：
+        - CLI 可以展示候选详情
+        - Trace 可以记录 route 细节
+        - Eval 可以比较 route 的稳定性
+        """
         return [
             PlanCandidateRecord(
                 template_id=candidate.template_id,

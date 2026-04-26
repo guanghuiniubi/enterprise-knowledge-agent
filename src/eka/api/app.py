@@ -15,10 +15,24 @@ class ChatRequest(BaseModel):
     session_id: str = Field(default="default", description="Conversation session id")
 
 
+class PlanRouteResponse(BaseModel):
+    template_id: str
+    candidate_template_ids: list[str]
+    selection_strategy: str
+    selection_reason: str
+    selection_confidence: float | None = None
+    fallback_used: bool
+    candidate_details: list[dict[str, object]]
+    route_trace: list[dict[str, object]]
+
+
 class ChatResponse(BaseModel):
     answer: str
     session_id: str
     plan_summary: str | None = None
+    plan_route: PlanRouteResponse | None = None
+    candidate_details: list[dict[str, object]]
+    route_trace: list[dict[str, object]]
     trace: list[dict[str, object]]
     retrieved_docs: list[dict[str, object]]
     tool_calls: list[dict[str, object]]
@@ -30,10 +44,42 @@ def get_agent():
 
 
 def serialize_result(result: ExecutionResult) -> ChatResponse:
+    candidate_details = [
+        {
+            "template_id": item.template_id,
+            "score": item.score,
+            "priority": item.priority,
+            "matched_keywords": item.matched_keywords,
+            "selected": item.selected,
+            "rejected_reason": item.rejected_reason,
+        }
+        for item in (result.plan.candidate_details if result.plan else [])
+    ]
+    route_trace = [
+        {"stage": item.stage, "message": item.message, "data": item.data}
+        for item in (result.plan.route_trace if result.plan else [])
+    ]
+
     return ChatResponse(
         answer=result.answer,
         session_id=result.session_id,
         plan_summary=result.plan.reasoning_summary if result.plan else None,
+        plan_route=(
+            PlanRouteResponse(
+                template_id=result.plan.template_id,
+                candidate_template_ids=result.plan.candidate_template_ids,
+                selection_strategy=result.plan.selection_strategy,
+                selection_reason=result.plan.selection_reason,
+                selection_confidence=result.plan.selection_confidence,
+                fallback_used=result.plan.fallback_used,
+                candidate_details=candidate_details,
+                route_trace=route_trace,
+            )
+            if result.plan
+            else None
+        ),
+        candidate_details=candidate_details,
+        route_trace=route_trace,
         trace=[{"stage": item.stage, "message": item.message, "data": item.data} for item in result.trace],
         retrieved_docs=[
             {
